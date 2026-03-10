@@ -1,0 +1,167 @@
+# Import necessary libraries
+import argparse
+import math
+import numpy as np
+
+import matplotlib.pyplot as plt
+from scipy import constants as scipy_constants
+
+# Constants for tyre coefficients from the paper
+SIDE_FORCE_COEFFICIENTS = {
+    'a1': -22.1,
+    'a2': 1011,
+    'a3': 1078,
+    'a4': 1.82,
+    'a5': 0.208,
+    'a6': 0.000,
+    'a7': -0.354,
+    'a8': 0.707,
+    'a9': 0.028,
+    'a10': 0.000,
+    'a11': 14.8,
+    'a12': 0.022,
+    'a13': 0.000
+}
+
+BRAKE_FORCE_COEFFICIENTS = {
+    'a1': -21.3,
+    'a2': 1144,
+    'a3': 49.6,
+    'a4': 226,
+    'a5': 0.069,
+    'a6': -0.006,
+    'a7': 0.056,
+    'a8': 0.486
+}
+
+# Function to compute pure side force
+def compute_pure_side_force(slip_angle_degrees, vertical_load_kilonewtons, friction_coefficient=0.90, camber_angle_degrees=0.0):
+    coeffs = SIDE_FORCE_COEFFICIENTS
+    original_peak_factor = coeffs['a1'] * vertical_load_kilonewtons**2 + coeffs['a2'] * vertical_load_kilonewtons
+    shape_factor = 1.3
+    stiffness_factor = (coeffs['a3'] * math.sin(coeffs['a4'] * math.atan(coeffs['a5'] * vertical_load_kilonewtons))
+                       / (shape_factor * original_peak_factor)) * (1 - coeffs['a12'] * abs(camber_angle_degrees))
+    curvature_factor = coeffs['a6'] * vertical_load_kilonewtons**2 + coeffs['a7'] * vertical_load_kilonewtons + coeffs['a8']
+    horizontal_shift = coeffs['a9'] * camber_angle_degrees
+    vertical_shift = (coeffs['a10'] * vertical_load_kilonewtons**2 + coeffs['a11'] * vertical_load_kilonewtons) * camber_angle_degrees
+    peak_factor = original_peak_factor * friction_coefficient
+    stiffness_factor = stiffness_factor / friction_coefficient
+    input_value = slip_angle_degrees + horizontal_shift
+    b_times_input = stiffness_factor * input_value
+    arctan_term = math.atan(b_times_input)
+    phi_value = (1 - curvature_factor) * input_value + (curvature_factor / stiffness_factor) * arctan_term
+    side_force = peak_factor * math.sin(shape_factor * math.atan(stiffness_factor * phi_value)) + vertical_shift
+    return side_force
+
+# Function to compute pure brake force 
+def compute_pure_brake_force(longitudinal_slip_percentage, vertical_load_kilonewtons, friction_coefficient=0.90):
+    coeffs = BRAKE_FORCE_COEFFICIENTS
+    original_peak_factor = coeffs['a1'] * vertical_load_kilonewtons**2 + coeffs['a2'] * vertical_load_kilonewtons
+    shape_factor = 1.65
+    stiffness_factor = (coeffs['a3'] * vertical_load_kilonewtons**2 + coeffs['a4'] * vertical_load_kilonewtons) / (shape_factor * original_peak_factor * math.exp(coeffs['a5'] * vertical_load_kilonewtons))
+    curvature_factor = coeffs['a6'] * vertical_load_kilonewtons**2 + coeffs['a7'] * vertical_load_kilonewtons + coeffs['a8']
+    horizontal_shift = 0.0
+    vertical_shift = 0.0
+    peak_factor = original_peak_factor * friction_coefficient
+    stiffness_factor = stiffness_factor / friction_coefficient
+    input_value = longitudinal_slip_percentage + horizontal_shift
+    b_times_input = stiffness_factor * input_value
+    arctan_term = math.atan(b_times_input)
+    phi_value = (1 - curvature_factor) * input_value + (curvature_factor / stiffness_factor) * arctan_term
+    brake_force = peak_factor * math.sin(shape_factor * math.atan(stiffness_factor * phi_value)) + vertical_shift
+    return brake_force
+
+# Function to compute Fy0 as a function of theoretical slip
+def compute_side_force_basic(theoretical_slip, vertical_load_kilonewtons, friction_coefficient):
+    alpha_degrees_from_slip = (180 / math.pi) * math.atan(theoretical_slip)
+    return compute_pure_side_force(alpha_degrees_from_slip, vertical_load_kilonewtons, friction_coefficient, 0.0)
+
+# Function to compute Fx0 as a function of theoretical slip
+def compute_brake_force_basic(theoretical_slip, vertical_load_kilonewtons, friction_coefficient):
+    longitudinal_slip_from_slip = - theoretical_slip / (1 + theoretical_slip)
+    return compute_pure_brake_force(longitudinal_slip_from_slip, vertical_load_kilonewtons, friction_coefficient)
+
+# Function to find the peak slip for side force
+def find_peak_side_slip(vertical_load_kilonewtons, friction_coefficient):
+    slip_angle_range = np.linspace(0, 30, 1000)
+    side_force_values = [compute_pure_side_force(a, vertical_load_kilonewtons, friction_coefficient) for a in slip_angle_range]
+    peak_index = np.argmax(side_force_values)
+    peak_slip_angle = slip_angle_range[peak_index]
+    peak_slip_angle_radians = peak_slip_angle * math.pi / 180
+    peak_theoretical_slip = math.tan(peak_slip_angle_radians)
+    return peak_theoretical_slip
+
+# Function to find the peak slip for brake force
+def find_peak_brake_slip(vertical_load_kilonewtons, friction_coefficient):
+    longitudinal_slip_range = np.linspace(-100, 0, 1000)
+    brake_force_values = [compute_pure_brake_force(k, vertical_load_kilonewtons, friction_coefficient) for k in longitudinal_slip_range]
+    peak_index = np.argmin(brake_force_values)
+    peak_longitudinal_slip = longitudinal_slip_range[peak_index]
+    peak_theoretical_slip = abs(- peak_longitudinal_slip / (1 + peak_longitudinal_slip))
+    return peak_theoretical_slip
+
+# Function to compute combined brake and side forces
+def compute_combined_forces(slip_angle_degrees, longitudinal_slip_percentage, vertical_load_kilonewtons, friction_coefficient):
+    slip_angle_radians = slip_angle_degrees * math.pi / 180
+    tan_slip_angle = math.tan(slip_angle_radians)
+    one_plus_long_slip = 1 + longitudinal_slip_percentage
+    theoretical_long_slip = abs(- longitudinal_slip_percentage / one_plus_long_slip)
+    theoretical_lat_slip = abs(- tan_slip_angle / one_plus_long_slip)
+    theoretical_total_slip = math.sqrt(theoretical_long_slip**2 + theoretical_lat_slip**2)
+    peak_long_theoretical_slip = find_peak_brake_slip(vertical_load_kilonewtons, friction_coefficient)
+    peak_lat_theoretical_slip = find_peak_side_slip(vertical_load_kilonewtons, friction_coefficient)
+    normalized_long_slip = theoretical_long_slip / peak_long_theoretical_slip
+    normalized_lat_slip = theoretical_lat_slip / peak_lat_theoretical_slip
+    normalized_total_slip = math.sqrt(normalized_long_slip**2 + normalized_lat_slip**2)
+    brake_force_basic_normalized = compute_brake_force_basic(normalized_total_slip, vertical_load_kilonewtons, friction_coefficient)
+    side_force_basic_normalized = compute_side_force_basic(normalized_total_slip, vertical_load_kilonewtons, friction_coefficient)
+    if normalized_total_slip > 0:
+        brake_force = - (normalized_long_slip / normalized_total_slip) * brake_force_basic_normalized
+        ratio = peak_lat_theoretical_slip / peak_long_theoretical_slip
+        direction_factor = ratio + (1 - ratio) / (1 + normalized_total_slip**2)
+        side_force = - direction_factor * (normalized_lat_slip / normalized_total_slip) * side_force_basic_normalized
+    else:
+        brake_force = 0.0
+        side_force = 0.0
+    return brake_force, side_force
+
+# Main function to run the simulation and plot
+def main():
+    # Setup argument parser
+    argument_parser = argparse.ArgumentParser(description="Simulation of tyre forces using Magic Formula")
+    argument_parser.add_argument("slip", type=float, nargs="?", default=5.0, help="slip angle in degrees")
+    argument_parser.add_argument("weight", type=float, nargs="?", default=2000.0, help="vehicle weight in kg")
+    argument_parser.add_argument("mu", type=float, nargs="?", default=0.9, help="friction coefficient")
+
+    args = argument_parser.parse_args()
+
+    slip_angle_degrees = args.slip
+    vehicle_weight_kg = args.weight
+    friction_coefficient = args.mu
+
+    gravity_acceleration = scipy_constants.g
+    vertical_load_newtons = vehicle_weight_kg * gravity_acceleration / 4
+    vertical_load_kilonewtons = vertical_load_newtons / 1000
+
+    longitudinal_slip_percent_range = np.linspace(0, 100, 200)
+    brake_force_list = []
+    side_force_list = []
+    for long_slip_percent in longitudinal_slip_percent_range:
+        long_slip = -long_slip_percent
+        brake_force, side_force = compute_combined_forces(slip_angle_degrees, long_slip, vertical_load_kilonewtons, friction_coefficient)
+        brake_force_list.append(-brake_force)
+        side_force_list.append(side_force)
+
+    # Create plot
+    plot_figure, plot_axis = plt.subplots()
+    plot_axis.plot(longitudinal_slip_percent_range, brake_force_list, label='Brake force')
+    plot_axis.plot(longitudinal_slip_percent_range, side_force_list, label='Side force')
+    plot_axis.set_xlabel('Longitudinal slip [%]')
+    plot_axis.set_ylabel('Force [N]')
+    plot_axis.set_title('Brake and Side Force over Longitudinal Slip at alpha = {:.2f} deg, mu = {:.2f}, weight = {:.0f} kg'.format(slip_angle_degrees, friction_coefficient, vehicle_weight_kg))
+    plot_axis.legend()
+    plot_figure.savefig('brake_side_force_plot.png')
+    plt.show()
+
+if __name__ == "__main__":
+    main()
